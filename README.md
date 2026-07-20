@@ -1,8 +1,11 @@
-PID Cat
-=======
+PID Cat REPL
+============
 
-An update to Jeff Sharkey's excellent [logcat color script][1] which only shows
-log entries for processes from a specific application package.
+A fork of [JakeWharton/pidcat][5], which is itself an update to Jeff Sharkey's
+excellent [logcat color script][1]. Both filter `adb logcat` down to the log
+entries for a specific application package; this fork adds an interactive,
+full-screen filter UI on top, turning `pidcat` into more of a REPL than a
+one-shot stream.
 
 During application development you often want to only display log messages
 coming from your app. Unfortunately, because the process ID changes every time
@@ -13,6 +16,10 @@ target package as the sole argument to the python script and enjoy a more
 convenient development process.
 
     pidcat com.oprah.bees.android
+
+If you just want the original, non-interactive `pidcat`, use the upstream
+[JakeWharton/pidcat][5] project or pass `--plain` here, see [Interactive
+mode](#interactive-mode) below.
 
 
 Here is an example of the output when running for the Google Plus app:
@@ -41,7 +48,11 @@ uses plain streaming, since there is no terminal to draw the UI on.
 Install
 -------
 
-Get the script:
+This fork isn't packaged anywhere; download `pidcat.py` from this repo and
+place it on your PATH.
+
+The Homebrew and AUR packages below install the upstream, non-interactive
+`pidcat` instead:
 
  *  OS X: Use [Homebrew][2].
 
@@ -53,8 +64,6 @@ Get the script:
         brew install --HEAD pidcat
 
  * Arch Linux : Install the package called `pidcat-git` from the [AUR][4].
-
- * Others: Download the `pidcat.py` and place it on your PATH.
 
 
 Make sure that `adb` from the [Android SDK][3] is on your PATH. This script will
@@ -84,3 +93,4 @@ sudo apt-get -t focal install coreutils
  [2]: http://brew.sh
  [3]: http://developer.android.com/sdk/
  [4]: https://aur.archlinux.org/packages/pidcat-git/
+ [5]: https://github.com/JakeWharton/pidcat

@@ -1,7 +1,7 @@
 Change Log
 ==========
 
-Unreleased
+Version 2.2.0 *(2026-07-20)*
 ----------------------------
 
  * New: Interactive full-screen filter UI, on by default when both stdin and stdout are a
