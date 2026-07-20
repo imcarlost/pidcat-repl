@@ -18,7 +18,7 @@ brew trust imcarlost/pidcat-repl
 brew install pidcat-repl
 ```
 
-Background
+Usage
 ----------
 
 During application development you often want to only display log messages
