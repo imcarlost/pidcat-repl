@@ -48,22 +48,13 @@ uses plain streaming, since there is no terminal to draw the UI on.
 Install
 -------
 
-This fork isn't packaged anywhere; download `pidcat.py` from this repo and
-place it on your PATH.
+Use [Homebrew][2]:
 
-The Homebrew and AUR packages below install the upstream, non-interactive
-`pidcat` instead:
-
- *  OS X: Use [Homebrew][2].
-
-         brew install pidcat
-
-    If you need to install the latest development version
-
-        brew unlink pidcat
-        brew install --HEAD pidcat
-
- * Arch Linux : Install the package called `pidcat-git` from the [AUR][4].
+```shell
+brew tap imcarlost/pidcat-repl
+brew trust imcarlost/pidcat-repl
+brew install pidcat-repl
+```
 
 
 Make sure that `adb` from the [Android SDK][3] is on your PATH. This script will
@@ -92,5 +83,4 @@ sudo apt-get -t focal install coreutils
  [1]: http://jsharkey.org/blog/2009/04/22/modifying-the-android-logcat-stream-for-full-color-debugging/
  [2]: http://brew.sh
  [3]: http://developer.android.com/sdk/
- [4]: https://aur.archlinux.org/packages/pidcat-git/
  [5]: https://github.com/JakeWharton/pidcat
