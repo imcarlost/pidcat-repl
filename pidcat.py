@@ -1,4 +1,4 @@
-#!/usr/bin/env -S python -u
+#!/usr/bin/env -S python3 -u
 
 '''
 Copyright 2009, The Android Open Source Project
@@ -22,9 +22,15 @@ limitations under the License.
 # Package filtering and output improvements by Jake Wharton, http://jakewharton.com
 
 import argparse
+import codecs
+import collections
+import os
+import select
+import signal
 import sys
 import re
 import subprocess
+import threading
 from subprocess import PIPE
 
 __version__ = '2.1.0'
@@ -46,6 +52,7 @@ parser.add_argument('-t', '--tag', dest='tag', action='append', help='Filter out
 parser.add_argument('-i', '--ignore-tag', dest='ignored_tag', action='append', help='Filter output by ignoring specified tag(s)')
 parser.add_argument('-v', '--version', action='version', version='%(prog)s ' + __version__, help='Print the version number and exit')
 parser.add_argument('-a', '--all', dest='all', action='store_true', default=False, help='Print all log messages')
+parser.add_argument('--plain', dest='plain', action='store_true', help='Plain streaming output, without the interactive filter UI')
 
 args = parser.parse_args()
 min_level = LOG_LEVELS_MAP[args.min_level.upper()]
@@ -74,7 +81,7 @@ catchall_package = list(filter(lambda package: package.find(":") == -1, package)
 # Store the name of processes to match exactly.
 named_processes = list(filter(lambda package: package.find(":") != -1, package))
 # Convert default process names from <package>: (cli notation) to <package> (android notation) in the exact names match group.
-named_processes = map(lambda package: package if package.find(":") != len(package) - 1 else package[:-1], named_processes)
+named_processes = list(map(lambda package: package if package.find(":") != len(package) - 1 else package[:-1], named_processes))
 
 header_size = args.tag_width + 1 + 3 + 1 # space, level, space
 
@@ -102,10 +109,12 @@ def colorize(message, fg=None, bg=None):
   return termcolor(fg, bg) + message + RESET if stdout_isatty else message
 
 def indent_wrap(message):
-  if width == -1:
+  wrap_area = width - header_size
+  # width == -1 means detection failed; a non-positive wrap area (very narrow or
+  # unsized terminal) would make the loop below never advance, so skip wrapping.
+  if width == -1 or wrap_area <= 0:
     return message
   message = message.replace('\t', '    ')
-  wrap_area = width - header_size
   messagebuf = ''
   current = 0
   while current < len(message):
@@ -193,7 +202,7 @@ if args.clear_logcat:
 # This is a ducktype of the subprocess.Popen object
 class FakeStdinProcess():
   def __init__(self):
-    self.stdout = sys.stdin
+    self.stdout = sys.stdin.buffer
   def poll(self):
     return None
 
@@ -272,91 +281,260 @@ while True:
       seen_pids = True
       pids.add(pid)
 
-while adb.poll() is None:
-  try:
-    line = adb.stdout.readline().decode('utf-8', 'replace').strip()
-  except KeyboardInterrupt:
-    break
-  if len(line) == 0:
-    break
+def stream(emit):
+  '''Parse adb output and hand each formatted block to emit(search_text, block).
 
-  bug_line = BUG_LINE.match(line)
-  if bug_line is not None:
-    continue
+  search_text is the block's plain, markup-free text, used by the interactive
+  filter; block is the colorized output.
+  '''
+  global last_tag, app_pid
 
-  log_line = LOG_LINE.match(line)
-  if log_line is None:
-    continue
+  while adb.poll() is None:
+    try:
+      line = adb.stdout.readline().decode('utf-8', 'replace').strip()
+    except KeyboardInterrupt:
+      break
+    if len(line) == 0:
+      break
 
-  level, tag, owner, message = log_line.groups()
-  tag = tag.strip()
-  start = parse_start_proc(line)
-  if start:
-    line_package, target, line_pid, line_uid, line_gids = start
-    if match_packages(line_package):
-      pids.add(line_pid)
+    bug_line = BUG_LINE.match(line)
+    if bug_line is not None:
+      continue
 
-      app_pid = line_pid
+    log_line = LOG_LINE.match(line)
+    if log_line is None:
+      continue
 
+    level, tag, owner, message = log_line.groups()
+    tag = tag.strip()
+    start = parse_start_proc(line)
+    if start:
+      line_package, target, line_pid, line_uid, line_gids = start
+      if match_packages(line_package):
+        pids.add(line_pid)
+
+        app_pid = line_pid
+
+        linebuf  = '\n'
+        linebuf += colorize(' ' * (header_size - 1), bg=WHITE)
+        linebuf += indent_wrap(' Process %s created for %s\n' % (line_package, target))
+        linebuf += colorize(' ' * (header_size - 1), bg=WHITE)
+        linebuf += ' PID: %s   UID: %s   GIDs: %s' % (line_pid, line_uid, line_gids)
+        linebuf += '\n'
+        emit('Process %s created for %s PID: %s' % (line_package, target, line_pid), linebuf)
+        last_tag = None # Ensure next log gets a tag printed
+
+    dead_pid, dead_pname = parse_death(tag, message)
+    if dead_pid:
+      pids.remove(dead_pid)
       linebuf  = '\n'
-      linebuf += colorize(' ' * (header_size - 1), bg=WHITE)
-      linebuf += indent_wrap(' Process %s created for %s\n' % (line_package, target))
-      linebuf += colorize(' ' * (header_size - 1), bg=WHITE)
-      linebuf += ' PID: %s   UID: %s   GIDs: %s' % (line_pid, line_uid, line_gids)
+      linebuf += colorize(' ' * (header_size - 1), bg=RED)
+      linebuf += ' Process %s (PID: %s) ended' % (dead_pname, dead_pid)
       linebuf += '\n'
-      print(linebuf)
+      emit('Process %s (PID: %s) ended' % (dead_pname, dead_pid), linebuf)
       last_tag = None # Ensure next log gets a tag printed
 
-  dead_pid, dead_pname = parse_death(tag, message)
-  if dead_pid:
-    pids.remove(dead_pid)
-    linebuf  = '\n'
-    linebuf += colorize(' ' * (header_size - 1), bg=RED)
-    linebuf += ' Process %s (PID: %s) ended' % (dead_pname, dead_pid)
-    linebuf += '\n'
-    print(linebuf)
-    last_tag = None # Ensure next log gets a tag printed
+    # Make sure the backtrace is printed after a native crash
+    if tag == 'DEBUG':
+      bt_line = BACKTRACE_LINE.match(message.lstrip())
+      if bt_line is not None:
+        message = message.lstrip()
+        owner = app_pid
 
-  # Make sure the backtrace is printed after a native crash
-  if tag == 'DEBUG':
-    bt_line = BACKTRACE_LINE.match(message.lstrip())
-    if bt_line is not None:
-      message = message.lstrip()
-      owner = app_pid
+    if not args.all and owner not in pids:
+      continue
+    if level in LOG_LEVELS_MAP and LOG_LEVELS_MAP[level] < min_level:
+      continue
+    if args.ignored_tag and tag_in_tags_regex(tag, args.ignored_tag):
+      continue
+    if args.tag and not tag_in_tags_regex(tag, args.tag):
+      continue
 
-  if not args.all and owner not in pids:
-    continue
-  if level in LOG_LEVELS_MAP and LOG_LEVELS_MAP[level] < min_level:
-    continue
-  if args.ignored_tag and tag_in_tags_regex(tag, args.ignored_tag):
-    continue
-  if args.tag and not tag_in_tags_regex(tag, args.tag):
-    continue
+    # Captured before color markup is added to the message.
+    search_text = '%s %s %s' % (level, tag, message)
 
-  linebuf = ''
+    linebuf = ''
 
-  if args.tag_width > 0:
-    # right-align tag title and allocate color if needed
-    if tag != last_tag or args.always_tags:
-      last_tag = tag
-      color = allocate_color(tag)
-      tag = tag[-args.tag_width:].rjust(args.tag_width)
-      linebuf += colorize(tag, fg=color)
+    if args.tag_width > 0:
+      # right-align tag title and allocate color if needed
+      if tag != last_tag or args.always_tags:
+        last_tag = tag
+        color = allocate_color(tag)
+        tag = tag[-args.tag_width:].rjust(args.tag_width)
+        linebuf += colorize(tag, fg=color)
+      else:
+        linebuf += ' ' * args.tag_width
+      linebuf += ' '
+
+    # write out level colored edge
+    if level in TAGTYPES:
+      linebuf += TAGTYPES[level]
     else:
-      linebuf += ' ' * args.tag_width
+      linebuf += ' ' + level + ' '
     linebuf += ' '
 
-  # write out level colored edge
-  if level in TAGTYPES:
-    linebuf += TAGTYPES[level]
-  else:
-    linebuf += ' ' + level + ' '
-  linebuf += ' '
+    # format tag message using rules
+    for matcher in RULES:
+      replace = RULES[matcher]
+      message = matcher.sub(replace, message)
 
-  # format tag message using rules
-  for matcher in RULES:
-    replace = RULES[matcher]
-    message = matcher.sub(replace, message)
+    linebuf += indent_wrap(message)
+    emit(search_text, linebuf)
 
-  linebuf += indent_wrap(message)
-  print(linebuf.encode('utf-8'))
+
+class InteractiveUI:
+  '''Full-screen filter UI: log lines render above a bottom prompt line, and the
+  typed query live-filters the scrollback. Every whitespace-separated word must
+  appear in a block's plain text (case-insensitive) for it to be shown.'''
+
+  MAX_ENTRIES = 10000  # (search_text, block) pairs kept for re-filtering
+  MAX_VISIBLE = 5000   # rendered lines kept for the current query
+
+  def __init__(self):
+    self.lock = threading.Lock()
+    self.entries = collections.deque(maxlen=self.MAX_ENTRIES)
+    self.visible = []
+    self.query = ''
+    self.status = ''
+    self.resized = False
+    self.rows, self.cols = self._term_size()
+
+  def _term_size(self):
+    try:
+      size = os.get_terminal_size(sys.stdout.fileno())
+      rows, cols = size.lines, size.columns
+    except OSError:
+      rows, cols = 24, 80
+    if rows < 5 or cols < 20:
+      rows, cols = 24, 80
+    return rows, cols
+
+  def _matches(self, search_lower):
+    return all(token in search_lower for token in self.query.lower().split())
+
+  def _append_visible(self, block):
+    self.visible.extend(block.split('\n'))
+    if len(self.visible) > self.MAX_VISIBLE:
+      del self.visible[:len(self.visible) - self.MAX_VISIBLE]
+
+  def emit(self, search_text, block):
+    with self.lock:
+      search_lower = search_text.lower()
+      self.entries.append((search_lower, block))
+      if self._matches(search_lower):
+        self._append_visible(block)
+      self._render()
+
+  def set_query(self, query):
+    with self.lock:
+      self.query = query
+      self.visible = []
+      for search_lower, block in self.entries:
+        if self._matches(search_lower):
+          self._append_visible(block)
+      self._render()
+
+  def refresh(self):
+    global width
+    with self.lock:
+      self.rows, self.cols = self._term_size()
+      width = self.cols  # future indent_wrap calls track the new size
+      self._render()
+
+  def _render(self):
+    log_rows = max(1, self.rows - 2)
+    lines = self.visible[-log_rows:]
+    out = ['\x1b[H']
+    # Pad above so the log content hugs the prompt, like a terminal.
+    for _ in range(log_rows - len(lines)):
+      out.append('\x1b[K\n')
+    for line in lines:
+      out.append(line + '\x1b[K\n')
+    if self.query:
+      state = '%d matching lines of %d blocks' % (len(self.visible), len(self.entries))
+    else:
+      state = '%d blocks' % len(self.entries)
+    if self.status:
+      state += ' \xb7 ' + self.status
+    separator = ' %s \xb7 type to filter \xb7 ctrl-u clear \xb7 ctrl-c quit' % state
+    out.append('\x1b[2m' + separator[:max(0, self.cols - 1)] + '\x1b[0m\x1b[K\n')
+    out.append('\x1b[36m❯\x1b[0m ' + self.query + '\x1b[K')
+    sys.stdout.write(''.join(out))
+    sys.stdout.flush()
+
+  def _drain_pending(self, fd):
+    # Swallow the rest of an escape sequence (arrow keys etc.) we do not handle.
+    while select.select([fd], [], [], 0)[0]:
+      if not os.read(fd, 64):
+        break
+
+  def run(self, reader_thread):
+    fd = sys.stdin.fileno()
+    old_attrs = termios.tcgetattr(fd)
+    decoder = codecs.getincrementaldecoder('utf-8')('replace')
+    signal.signal(signal.SIGWINCH, lambda *_: setattr(self, 'resized', True))
+    sys.stdout.write('\x1b[?1049h\x1b[?7l\x1b[2J\x1b[H')  # alt screen, no autowrap
+    sys.stdout.flush()
+    tty.setcbreak(fd)
+    reader_thread.start()
+    try:
+      with self.lock:
+        self._render()
+      while True:
+        if self.resized:
+          self.resized = False
+          self.refresh()
+        if not reader_thread.is_alive() and not self.status:
+          self.status = 'adb ended, scrollback still filterable'
+          with self.lock:
+            self._render()
+        if not select.select([fd], [], [], 0.2)[0]:
+          continue
+        data = os.read(fd, 64)
+        if not data:
+          break
+        for ch in decoder.decode(data):
+          if ch in ('\x7f', '\x08'):  # backspace
+            if self.query:
+              self.set_query(self.query[:-1])
+          elif ch == '\x15':  # ctrl-u
+            if self.query:
+              self.set_query('')
+          elif ch == '\x04':  # ctrl-d
+            return
+          elif ch == '\x0c':  # ctrl-l
+            self.refresh()
+          elif ch == '\x1b':
+            decoder.reset()
+            self._drain_pending(fd)
+            break
+          elif ch in ('\r', '\n', '\t'):
+            pass
+          elif ch >= ' ':
+            self.set_query(self.query + ch)
+    except KeyboardInterrupt:
+      pass
+    finally:
+      termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+      sys.stdout.write('\x1b[?7h\x1b[?1049l')
+      sys.stdout.flush()
+
+
+interactive = sys.stdin.isatty() and stdout_isatty and not args.plain
+if interactive:
+  try:
+    import termios
+    import tty
+  except ImportError:
+    interactive = False  # not a POSIX terminal; stream like before
+
+if interactive:
+  ui = InteractiveUI()
+  stream_thread = threading.Thread(target=stream, args=(ui.emit,), daemon=True)
+  ui.run(stream_thread)
+else:
+  if hasattr(signal, 'SIGPIPE'):
+    # Die quietly like other unix filters when the downstream reader closes,
+    # e.g. `pidcat --plain <pkg> | head`.
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+  stream(lambda search_text, block: print(block))

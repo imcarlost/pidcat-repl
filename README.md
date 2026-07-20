@@ -20,6 +20,24 @@ Here is an example of the output when running for the Google Plus app:
 ![Example screen](screen.png)
 
 
+Interactive mode
+-----------------
+
+When both stdin and stdout are a terminal, `pidcat` opens a full-screen filter
+UI instead of streaming: logs render above a bottom prompt line, and whatever
+you type live-filters the scrollback to lines containing every typed word,
+case-insensitively.
+
+ * `Backspace` edits the query, `Ctrl-U` clears it.
+ * `Ctrl-L` forces a redraw; the view also tracks terminal resizes.
+ * `Ctrl-C` or `Ctrl-D` quits and restores your scrollback.
+
+Pass `--plain` to get the original streaming output instead, e.g. for
+`pidcat --plain com.oprah.bees.android | grep Foo`. Piped input or output
+(`adb logcat | pidcat com.oprah.bees.android`, `pidcat ... | less`) always
+uses plain streaming, since there is no terminal to draw the UI on.
+
+
 Install
 -------
 

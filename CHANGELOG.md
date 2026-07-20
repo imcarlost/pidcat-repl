@@ -1,6 +1,23 @@
 Change Log
 ==========
 
+Unreleased
+----------------------------
+
+ * New: Interactive full-screen filter UI, on by default when both stdin and stdout are a
+   terminal. Logs render above a bottom prompt line; typing live-filters the scrollback to
+   lines containing every typed word, case-insensitively. `--plain` restores the previous
+   streaming output; piped usage is unaffected.
+ * Fix: `print(linebuf.encode('utf-8'))` printed the Python 3 bytes repr of every line
+   instead of the line itself.
+ * Fix: `named_processes` was still a lazily-exhausted `map()` object after the Python 3
+   port wrapped `catchall_package` in `list()`.
+ * Fix: piping `adb logcat` into `pidcat` crashed under Python 3, since `FakeStdinProcess`
+   read `sys.stdin` (str) where the rest of the script expected bytes.
+ * Fix: `indent_wrap` could hang given a non-positive wrap area, e.g. an unsized terminal.
+ * Fix: shebang invoked `python`, which no longer exists on systems that only ship `python3`.
+
+
 Version 2.1.0 *(2016-09-07)*
 ----------------------------
 
