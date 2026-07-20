@@ -1,6 +1,18 @@
 Change Log
 ==========
 
+Version 2.3.0 *(2026-07-20)*
+----------------------------
+
+ * New: Esc quits the interactive UI. A bare Escape keypress exits; Escape sequences
+   (arrow keys, mouse reports) are still parsed normally.
+ * Fix: Scrolling the interactive UI now works. Up/Down, Page Up/Down, Home/End, and
+   the mouse wheel scroll the retained scrollback; new lines no longer yank you back
+   to the tail while you're scrolled up.
+ * New: Clicking a line in the interactive UI clears the filter, unfilters the log,
+   and scrolls to that line in the full history.
+
+
 Version 2.2.0 *(2026-07-20)*
 ----------------------------
 

@@ -33,7 +33,7 @@ import subprocess
 import threading
 from subprocess import PIPE
 
-__version__ = '2.2.0'
+__version__ = '2.3.0'
 
 LOG_LEVELS = 'VDIWEF'
 LOG_LEVELS_MAP = dict([(LOG_LEVELS[i], i) for i in range(len(LOG_LEVELS))])
@@ -392,11 +392,14 @@ class InteractiveUI:
 
   def __init__(self):
     self.lock = threading.Lock()
-    self.entries = collections.deque(maxlen=self.MAX_ENTRIES)
-    self.visible = []
+    self.entries = collections.deque(maxlen=self.MAX_ENTRIES)  # (entry_id, search_lower, block)
+    self.visible = []  # (entry_id, line_text)
+    self.next_entry_id = 0
     self.query = ''
     self.status = ''
     self.resized = False
+    self.scroll_offset = 0  # lines scrolled up from the tail; 0 == following the live tail
+    self.render_start = 0   # index into self.visible of the top rendered line
     self.rows, self.cols = self._term_size()
 
   def _term_size(self):
@@ -412,26 +415,36 @@ class InteractiveUI:
   def _matches(self, search_lower):
     return all(token in search_lower for token in self.query.lower().split())
 
-  def _append_visible(self, block):
-    self.visible.extend(block.split('\n'))
-    if len(self.visible) > self.MAX_VISIBLE:
-      del self.visible[:len(self.visible) - self.MAX_VISIBLE]
+  def _append_visible(self, entry_id, block):
+    new_lines = [(entry_id, line) for line in block.split('\n')]
+    self.visible.extend(new_lines)
+    if self.scroll_offset > 0:
+      # Keep whatever the user is currently looking at in place instead of
+      # letting newly-arrived lines push it down and out of view.
+      self.scroll_offset += len(new_lines)
+    overflow = len(self.visible) - self.MAX_VISIBLE
+    if overflow > 0:
+      del self.visible[:overflow]
+      self.scroll_offset = max(0, self.scroll_offset - overflow)
 
   def emit(self, search_text, block):
     with self.lock:
+      entry_id = self.next_entry_id
+      self.next_entry_id += 1
       search_lower = search_text.lower()
-      self.entries.append((search_lower, block))
+      self.entries.append((entry_id, search_lower, block))
       if self._matches(search_lower):
-        self._append_visible(block)
+        self._append_visible(entry_id, block)
       self._render()
 
   def set_query(self, query):
     with self.lock:
       self.query = query
       self.visible = []
-      for search_lower, block in self.entries:
+      self.scroll_offset = 0
+      for entry_id, search_lower, block in self.entries:
         if self._matches(search_lower):
-          self._append_visible(block)
+          self._append_visible(entry_id, block)
       self._render()
 
   def refresh(self):
@@ -443,40 +456,149 @@ class InteractiveUI:
 
   def _render(self):
     log_rows = max(1, self.rows - 2)
-    lines = self.visible[-log_rows:]
+    max_offset = max(0, len(self.visible) - log_rows)
+    if self.scroll_offset > max_offset:
+      self.scroll_offset = max_offset
+    end = len(self.visible) - self.scroll_offset
+    start = max(0, end - log_rows)
+    self.render_start = start
+    window = self.visible[start:end]
     out = ['\x1b[H']
     # Pad above so the log content hugs the prompt, like a terminal.
-    for _ in range(log_rows - len(lines)):
+    for _ in range(log_rows - len(window)):
       out.append('\x1b[K\n')
-    for line in lines:
+    for _, line in window:
       out.append(line + '\x1b[K\n')
     if self.query:
       state = '%d matching lines of %d blocks' % (len(self.visible), len(self.entries))
     else:
       state = '%d blocks' % len(self.entries)
+    if self.scroll_offset > 0:
+      state += ' \xb7 scrolled (End to jump to latest)'
     if self.status:
       state += ' \xb7 ' + self.status
-    separator = ' %s \xb7 type to filter \xb7 ctrl-u clear \xb7 ctrl-c quit' % state
+    separator = ' %s \xb7 type to filter \xb7 ctrl-u clear \xb7 click a line to unfilter \xb7 esc/ctrl-c quit' % state
     out.append('\x1b[2m' + separator[:max(0, self.cols - 1)] + '\x1b[0m\x1b[K\n')
     out.append('\x1b[36m❯\x1b[0m ' + self.query + '\x1b[K')
     sys.stdout.write(''.join(out))
     sys.stdout.flush()
 
-  def _drain_pending(self, fd):
-    # Swallow the rest of an escape sequence (arrow keys etc.) we do not handle.
-    while select.select([fd], [], [], 0)[0]:
-      if not os.read(fd, 64):
+  MOUSE_RE = re.compile(r'^\[<(\d+);(\d+);(\d+)([Mm])$')
+
+  def _scroll(self, delta):
+    with self.lock:
+      log_rows = max(1, self.rows - 2)
+      max_offset = max(0, len(self.visible) - log_rows)
+      self.scroll_offset = max(0, min(max_offset, self.scroll_offset + delta))
+      self._render()
+
+  def _handle_click(self, row):
+    with self.lock:
+      log_rows = max(1, self.rows - 2)
+      if row < 1 or row > log_rows:
+        return
+      idx = self.render_start + (row - 1)
+      if idx < 0 or idx >= len(self.visible):
+        return
+      entry_id = self.visible[idx][0]
+    self._jump_to_entry(entry_id)
+
+  def _jump_to_entry(self, entry_id):
+    '''Clears the filter, rebuilds the full unfiltered scrollback, and scrolls
+    so the clicked entry is in view with a bit of context above it.'''
+    with self.lock:
+      self.query = ''
+      self.visible = []
+      self.scroll_offset = 0
+      target_index = None
+      for eid, _search_lower, block in self.entries:
+        for line in block.split('\n'):
+          if target_index is None and eid == entry_id:
+            target_index = len(self.visible)
+          self.visible.append((eid, line))
+      overflow = len(self.visible) - self.MAX_VISIBLE
+      if overflow > 0:
+        del self.visible[:overflow]
+        if target_index is not None:
+          target_index -= overflow
+      if target_index is not None and target_index >= 0:
+        log_rows = max(1, self.rows - 2)
+        max_offset = max(0, len(self.visible) - log_rows)
+        desired_end = target_index + max(1, log_rows // 3)
+        self.scroll_offset = max(0, min(max_offset, len(self.visible) - desired_end))
+      self._render()
+
+  def _handle_escape(self, seq):
+    m = self.MOUSE_RE.match(seq)
+    if m:
+      button, _col, row, kind = m.groups()
+      if kind != 'M':  # ignore button-release reports
+        return
+      button = int(button)
+      if button == 0:  # left click
+        self._handle_click(int(row))
+      elif button == 64:  # wheel up
+        self._scroll(3)
+      elif button == 65:  # wheel down
+        self._scroll(-3)
+      return
+    log_rows = max(1, self.rows - 2)
+    if seq in ('[A', 'OA'):  # up
+      self._scroll(1)
+    elif seq in ('[B', 'OB'):  # down
+      self._scroll(-1)
+    elif seq == '[5~':  # page up
+      self._scroll(log_rows)
+    elif seq == '[6~':  # page down
+      self._scroll(-log_rows)
+    elif seq in ('[H', '[1~'):  # home
+      self._scroll(10 ** 9)
+    elif seq in ('[F', '[4~'):  # end
+      self._scroll(-(10 ** 9))
+
+  def _read_escape(self, pending, fd, decoder):
+    '''Consumes the sequence following an ESC already pulled from `pending`.
+    Returns (seq, rest_of_pending). seq is None for a standalone Escape
+    keypress (nothing followed it within the grace window), '' when ESC was
+    followed by something unrelated, or the sequence body (e.g. '[A')
+    otherwise.'''
+    if not pending:
+      # Give a fast terminal-generated sequence (arrow keys, mouse reports)
+      # a brief window to arrive before treating this as a lone Escape.
+      if select.select([fd], [], [], 0.01)[0]:
+        data = os.read(fd, 64)
+        if data:
+          pending = decoder.decode(data)
+    if not pending:
+      return None, pending
+    introducer = pending[0]
+    if introducer not in ('[', 'O'):
+      return '', pending
+    seq = introducer
+    pending = pending[1:]
+    while not (seq[-1].isalpha() or seq[-1] == '~'):
+      if not pending:
+        if select.select([fd], [], [], 0.01)[0]:
+          data = os.read(fd, 64)
+          if data:
+            pending += decoder.decode(data)
+            continue
         break
+      seq += pending[0]
+      pending = pending[1:]
+    return seq, pending
 
   def run(self, reader_thread):
     fd = sys.stdin.fileno()
     old_attrs = termios.tcgetattr(fd)
     decoder = codecs.getincrementaldecoder('utf-8')('replace')
     signal.signal(signal.SIGWINCH, lambda *_: setattr(self, 'resized', True))
-    sys.stdout.write('\x1b[?1049h\x1b[?7l\x1b[2J\x1b[H')  # alt screen, no autowrap
+    # Alt screen, no autowrap, mouse click/wheel reporting (SGR encoding).
+    sys.stdout.write('\x1b[?1049h\x1b[?7l\x1b[2J\x1b[H\x1b[?1000h\x1b[?1006h')
     sys.stdout.flush()
     tty.setcbreak(fd)
     reader_thread.start()
+    pending = ''  # decoded characters carried over between reads
     try:
       with self.lock:
         self._render()
@@ -488,35 +610,41 @@ class InteractiveUI:
           self.status = 'adb ended, scrollback still filterable'
           with self.lock:
             self._render()
-        if not select.select([fd], [], [], 0.2)[0]:
-          continue
-        data = os.read(fd, 64)
-        if not data:
-          break
-        for ch in decoder.decode(data):
-          if ch in ('\x7f', '\x08'):  # backspace
-            if self.query:
-              self.set_query(self.query[:-1])
-          elif ch == '\x15':  # ctrl-u
-            if self.query:
-              self.set_query('')
-          elif ch == '\x04':  # ctrl-d
-            return
-          elif ch == '\x0c':  # ctrl-l
-            self.refresh()
-          elif ch == '\x1b':
-            decoder.reset()
-            self._drain_pending(fd)
+        if not pending:
+          if not select.select([fd], [], [], 0.2)[0]:
+            continue
+          data = os.read(fd, 64)
+          if not data:
             break
-          elif ch in ('\r', '\n', '\t'):
-            pass
-          elif ch >= ' ':
-            self.set_query(self.query + ch)
+          pending = decoder.decode(data)
+          if not pending:
+            continue
+        ch, pending = pending[0], pending[1:]
+        if ch in ('\x7f', '\x08'):  # backspace
+          if self.query:
+            self.set_query(self.query[:-1])
+        elif ch == '\x15':  # ctrl-u
+          if self.query:
+            self.set_query('')
+        elif ch == '\x04':  # ctrl-d
+          return
+        elif ch == '\x0c':  # ctrl-l
+          self.refresh()
+        elif ch == '\x1b':
+          seq, pending = self._read_escape(pending, fd, decoder)
+          if seq is None:  # standalone Escape keypress
+            return
+          if seq:
+            self._handle_escape(seq)
+        elif ch in ('\r', '\n', '\t'):
+          pass
+        elif ch >= ' ':
+          self.set_query(self.query + ch)
     except KeyboardInterrupt:
       pass
     finally:
       termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
-      sys.stdout.write('\x1b[?7h\x1b[?1049l')
+      sys.stdout.write('\x1b[?1006l\x1b[?1000l\x1b[?7h\x1b[?1049l')
       sys.stdout.flush()
 
 
