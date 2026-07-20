@@ -7,6 +7,20 @@ entries for a specific application package; this fork adds an interactive,
 full-screen filter UI on top, turning `pidcat` into more of a REPL than a
 one-shot stream.
 
+Install
+-------
+
+Use [Homebrew][2]:
+
+```shell
+brew tap imcarlost/pidcat-repl
+brew trust imcarlost/pidcat-repl
+brew install pidcat-repl
+```
+
+Background
+----------
+
 During application development you often want to only display log messages
 coming from your app. Unfortunately, because the process ID changes every time
 you deploy to the phone it becomes a challenge to grep for the right thing.
@@ -37,7 +51,7 @@ case-insensitively.
 
  * `Backspace` edits the query, `Ctrl-U` clears it.
  * `Ctrl-L` forces a redraw; the view also tracks terminal resizes.
- * `Ctrl-C` or `Ctrl-D` quits and restores your scrollback.
+ * `Esc` or `Ctrl-D` quits and restores your scrollback.
 
 Pass `--plain` to get the original streaming output instead, e.g. for
 `pidcat --plain com.oprah.bees.android | grep Foo`. Piped input or output
@@ -45,17 +59,8 @@ Pass `--plain` to get the original streaming output instead, e.g. for
 uses plain streaming, since there is no terminal to draw the UI on.
 
 
-Install
--------
-
-Use [Homebrew][2]:
-
-```shell
-brew tap imcarlost/pidcat-repl
-brew trust imcarlost/pidcat-repl
-brew install pidcat-repl
-```
-
+Requirements
+------------
 
 Make sure that `adb` from the [Android SDK][3] is on your PATH. This script will
 not work unless this is that case. That means, when you type `adb` and press

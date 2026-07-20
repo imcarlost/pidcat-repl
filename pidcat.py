@@ -33,7 +33,7 @@ import subprocess
 import threading
 from subprocess import PIPE
 
-__version__ = '2.3.0'
+__version__ = '2.4.0'
 
 LOG_LEVELS = 'VDIWEF'
 LOG_LEVELS_MAP = dict([(LOG_LEVELS[i], i) for i in range(len(LOG_LEVELS))])
@@ -321,7 +321,7 @@ def stream(emit):
         linebuf += colorize(' ' * (header_size - 1), bg=WHITE)
         linebuf += ' PID: %s   UID: %s   GIDs: %s' % (line_pid, line_uid, line_gids)
         linebuf += '\n'
-        emit('Process %s created for %s PID: %s' % (line_package, target, line_pid), linebuf)
+        emit('Process %s created for %s PID: %s' % (line_package, target, line_pid), linebuf, is_separator=True)
         last_tag = None # Ensure next log gets a tag printed
 
     dead_pid, dead_pname = parse_death(tag, message)
@@ -331,7 +331,7 @@ def stream(emit):
       linebuf += colorize(' ' * (header_size - 1), bg=RED)
       linebuf += ' Process %s (PID: %s) ended' % (dead_pname, dead_pid)
       linebuf += '\n'
-      emit('Process %s (PID: %s) ended' % (dead_pname, dead_pid), linebuf)
+      emit('Process %s (PID: %s) ended' % (dead_pname, dead_pid), linebuf, is_separator=True)
       last_tag = None # Ensure next log gets a tag printed
 
     # Make sure the backtrace is printed after a native crash
@@ -385,21 +385,24 @@ def stream(emit):
 class InteractiveUI:
   '''Full-screen filter UI: log lines render above a bottom prompt line, and the
   typed query live-filters the scrollback. Every whitespace-separated word must
-  appear in a block's plain text (case-insensitive) for it to be shown.'''
+  appear in a block's plain text (case-insensitive) for it to be shown, except
+  process create/death separators, which always stay visible so filtered runs
+  can still be told apart.'''
 
   MAX_ENTRIES = 10000  # (search_text, block) pairs kept for re-filtering
   MAX_VISIBLE = 5000   # rendered lines kept for the current query
 
   def __init__(self):
     self.lock = threading.Lock()
-    self.entries = collections.deque(maxlen=self.MAX_ENTRIES)  # (entry_id, search_lower, block)
+    self.entries = collections.deque(maxlen=self.MAX_ENTRIES)  # (entry_id, search_lower, block, is_separator)
     self.visible = []  # (entry_id, line_text)
     self.next_entry_id = 0
     self.query = ''
     self.status = ''
     self.resized = False
     self.scroll_offset = 0  # lines scrolled up from the tail; 0 == following the live tail
-    self.render_start = 0   # index into self.visible of the top rendered line
+    self.hover_row = None      # 0-based screen row the pointer is over, or None
+    self.selected_index = None  # index into self.visible pinned by the last click, or None
     self.rows, self.cols = self._term_size()
 
   def _term_size(self):
@@ -415,6 +418,11 @@ class InteractiveUI:
   def _matches(self, search_lower):
     return all(token in search_lower for token in self.query.lower().split())
 
+  def _included(self, search_lower, is_separator):
+    # Process create/death separators ignore the filter so a run boundary is
+    # never hidden by an unrelated search.
+    return is_separator or self._matches(search_lower)
+
   def _append_visible(self, entry_id, block):
     new_lines = [(entry_id, line) for line in block.split('\n')]
     self.visible.extend(new_lines)
@@ -426,14 +434,18 @@ class InteractiveUI:
     if overflow > 0:
       del self.visible[:overflow]
       self.scroll_offset = max(0, self.scroll_offset - overflow)
+      if self.selected_index is not None:
+        self.selected_index -= overflow
+        if self.selected_index < 0:
+          self.selected_index = None
 
-  def emit(self, search_text, block):
+  def emit(self, search_text, block, is_separator=False):
     with self.lock:
       entry_id = self.next_entry_id
       self.next_entry_id += 1
       search_lower = search_text.lower()
-      self.entries.append((entry_id, search_lower, block))
-      if self._matches(search_lower):
+      self.entries.append((entry_id, search_lower, block, is_separator))
+      if self._included(search_lower, is_separator):
         self._append_visible(entry_id, block)
       self._render()
 
@@ -442,8 +454,9 @@ class InteractiveUI:
       self.query = query
       self.visible = []
       self.scroll_offset = 0
-      for entry_id, search_lower, block in self.entries:
-        if self._matches(search_lower):
+      self.selected_index = None  # a new search replaces whatever was pinned
+      for entry_id, search_lower, block, is_separator in self.entries:
+        if self._included(search_lower, is_separator):
           self._append_visible(entry_id, block)
       self._render()
 
@@ -454,21 +467,36 @@ class InteractiveUI:
       width = self.cols  # future indent_wrap calls track the new size
       self._render()
 
-  def _render(self):
+  def _window_bounds(self):
+    '''Returns (start, end, pad): the self.visible slice currently on screen and
+    how many blank padding rows precede it (when there isn't enough content yet
+    to fill the log area).'''
     log_rows = max(1, self.rows - 2)
     max_offset = max(0, len(self.visible) - log_rows)
     if self.scroll_offset > max_offset:
       self.scroll_offset = max_offset
     end = len(self.visible) - self.scroll_offset
     start = max(0, end - log_rows)
-    self.render_start = start
+    pad = log_rows - (end - start)
+    return start, end, pad
+
+  def _render(self):
+    log_rows = max(1, self.rows - 2)
+    start, end, pad = self._window_bounds()
     window = self.visible[start:end]
     out = ['\x1b[H']
     # Pad above so the log content hugs the prompt, like a terminal.
-    for _ in range(log_rows - len(window)):
+    for _ in range(pad):
       out.append('\x1b[K\n')
-    for _, line in window:
-      out.append(line + '\x1b[K\n')
+    for i, (_, line) in enumerate(window):
+      # Only hint clickability when a filter is active; with no filter a
+      # click is a no-op, so there's nothing to invite the user to click.
+      hovered = self.query and self.hover_row == pad + i
+      selected = self.selected_index == start + i
+      if hovered or selected:
+        out.append('\x1b[7m' + line.replace(RESET, RESET + '\x1b[7m') + RESET + '\x1b[K\n')
+      else:
+        out.append(line + '\x1b[K\n')
     if self.query:
       state = '%d matching lines of %d blocks' % (len(self.visible), len(self.entries))
     else:
@@ -477,7 +505,8 @@ class InteractiveUI:
       state += ' \xb7 scrolled (End to jump to latest)'
     if self.status:
       state += ' \xb7 ' + self.status
-    separator = ' %s \xb7 type to filter \xb7 ctrl-u clear \xb7 click a line to unfilter \xb7 esc/ctrl-c quit' % state
+    hint = ' \xb7 click a line to unfilter' if self.query else ''
+    separator = ' %s \xb7 type to filter \xb7 ctrl-u clear%s \xb7 esc/ctrl-c quit' % (state, hint)
     out.append('\x1b[2m' + separator[:max(0, self.cols - 1)] + '\x1b[0m\x1b[K\n')
     out.append('\x1b[36m❯\x1b[0m ' + self.query + '\x1b[K')
     sys.stdout.write(''.join(out))
@@ -494,24 +523,38 @@ class InteractiveUI:
 
   def _handle_click(self, row):
     with self.lock:
-      log_rows = max(1, self.rows - 2)
-      if row < 1 or row > log_rows:
+      if not self.query:  # nothing to unfilter, so clicking is a no-op
         return
-      idx = self.render_start + (row - 1)
+      log_rows = max(1, self.rows - 2)
+      start, _end, pad = self._window_bounds()
+      if row < 1 or row > log_rows or row <= pad:
+        return
+      idx = start + (row - 1 - pad)
       if idx < 0 or idx >= len(self.visible):
         return
       entry_id = self.visible[idx][0]
     self._jump_to_entry(entry_id)
 
+  def _handle_hover(self, row):
+    with self.lock:
+      log_rows = max(1, self.rows - 2)
+      _start, _end, pad = self._window_bounds()
+      new_hover = (row - 1) if (1 <= row <= log_rows and row > pad) else None
+      if new_hover == self.hover_row:
+        return
+      self.hover_row = new_hover
+      self._render()
+
   def _jump_to_entry(self, entry_id):
     '''Clears the filter, rebuilds the full unfiltered scrollback, and scrolls
-    so the clicked entry is in view with a bit of context above it.'''
+    so the clicked entry is in view with a bit of context above it. The entry's
+    line stays pinned/highlighted until another search starts.'''
     with self.lock:
       self.query = ''
       self.visible = []
       self.scroll_offset = 0
       target_index = None
-      for eid, _search_lower, block in self.entries:
+      for eid, _search_lower, block, _is_separator in self.entries:
         for line in block.split('\n'):
           if target_index is None and eid == entry_id:
             target_index = len(self.visible)
@@ -522,10 +565,13 @@ class InteractiveUI:
         if target_index is not None:
           target_index -= overflow
       if target_index is not None and target_index >= 0:
+        self.selected_index = target_index
         log_rows = max(1, self.rows - 2)
         max_offset = max(0, len(self.visible) - log_rows)
         desired_end = target_index + max(1, log_rows // 3)
         self.scroll_offset = max(0, min(max_offset, len(self.visible) - desired_end))
+      else:
+        self.selected_index = None
       self._render()
 
   def _handle_escape(self, seq):
@@ -537,6 +583,8 @@ class InteractiveUI:
       button = int(button)
       if button == 0:  # left click
         self._handle_click(int(row))
+      elif button == 35:  # pointer moved, no button held
+        self._handle_hover(int(row))
       elif button == 64:  # wheel up
         self._scroll(3)
       elif button == 65:  # wheel down
@@ -593,8 +641,8 @@ class InteractiveUI:
     old_attrs = termios.tcgetattr(fd)
     decoder = codecs.getincrementaldecoder('utf-8')('replace')
     signal.signal(signal.SIGWINCH, lambda *_: setattr(self, 'resized', True))
-    # Alt screen, no autowrap, mouse click/wheel reporting (SGR encoding).
-    sys.stdout.write('\x1b[?1049h\x1b[?7l\x1b[2J\x1b[H\x1b[?1000h\x1b[?1006h')
+    # Alt screen, no autowrap, mouse click/wheel/motion reporting (SGR encoding).
+    sys.stdout.write('\x1b[?1049h\x1b[?7l\x1b[2J\x1b[H\x1b[?1000h\x1b[?1003h\x1b[?1006h')
     sys.stdout.flush()
     tty.setcbreak(fd)
     reader_thread.start()
@@ -644,7 +692,7 @@ class InteractiveUI:
       pass
     finally:
       termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
-      sys.stdout.write('\x1b[?1006l\x1b[?1000l\x1b[?7h\x1b[?1049l')
+      sys.stdout.write('\x1b[?1006l\x1b[?1003l\x1b[?1000l\x1b[?7h\x1b[?1049l')
       sys.stdout.flush()
 
 
@@ -665,4 +713,4 @@ else:
     # Die quietly like other unix filters when the downstream reader closes,
     # e.g. `pidcat --plain <pkg> | head`.
     signal.signal(signal.SIGPIPE, signal.SIG_DFL)
-  stream(lambda search_text, block: print(block))
+  stream(lambda search_text, block, is_separator=False: print(block))

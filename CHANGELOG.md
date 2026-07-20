@@ -1,6 +1,20 @@
 Change Log
 ==========
 
+Version 2.4.0 *(2026-07-20)*
+----------------------------
+
+ * Fix: Clicking a line with no filter active was recentering the view instead of doing
+   nothing; it's now a no-op until you actually have something to unfilter.
+ * Fix: Click-to-line row math was off whenever the log hadn't filled the screen yet
+   (e.g. right after startup), so clicks could land on the wrong entry or miss entirely.
+ * New: Hovering over a line highlights it while a filter is active, hinting that it's
+   clickable.
+ * New: The line you click stays highlighted after the filter clears, so you can find
+   it in the full scrollback; the highlight clears once you start another search.
+ * New: Process create/death separators now stay visible even while a filter is active,
+   so you can tell separate app runs apart in filtered results.
+
 Version 2.3.0 *(2026-07-20)*
 ----------------------------
 
