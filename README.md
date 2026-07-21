@@ -38,7 +38,7 @@ mode](#interactive-mode) below.
 
 Here is an example of the output when running for the Google Plus app:
 
-![Example screen](screen.jpg)
+![Example screen](screen.jpeg)
 
 
 Interactive mode
