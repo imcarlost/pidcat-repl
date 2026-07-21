@@ -7,6 +7,8 @@ entries for a specific application package; this fork adds an interactive,
 full-screen filter UI on top, turning `pidcat` into more of a REPL than a
 one-shot stream.
 
+![Example screen](screen.jpeg)
+
 Install
 -------
 
@@ -34,11 +36,6 @@ convenient development process.
 If you just want the original, non-interactive `pidcat`, use the upstream
 [JakeWharton/pidcat][5] project or pass `--plain` here, see [Interactive
 mode](#interactive-mode) below.
-
-
-Here is an example of the output when running for the Google Plus app:
-
-![Example screen](screen.jpeg)
 
 
 Interactive mode
